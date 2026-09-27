@@ -1,0 +1,21 @@
+# Codex instructions
+
+- This is a Roblox game written in Luau.
+- The project is synchronized with Roblox Studio using Rojo.
+- `src/client` contains client-side systems.
+- `src/server` contains server-side systems.
+- `src/shared` contains shared modules and configuration.
+- Prefer modular architecture.
+- Inspect existing code before adding new systems.
+- Reuse existing systems instead of creating duplicates where possible.
+- Do not rewrite working systems unnecessarily.
+- Do not modify unrelated files.
+- The server must be authoritative for gameplay-critical state such as damage, health, ammunition, enemies, and game state.
+- Never trust arbitrary gameplay values supplied by the client.
+- Before finishing a task, inspect the git diff.
+- Run available checks when possible.
+- After implementing a task, update `AI/IMPLEMENTATION.md`.
+- `AI/TASK.md` describes WHAT must be built.
+- `AI/PLAN.md` describes HOW it should integrate with the current project.
+- Do not modify `AI/TASK.md` during implementation.
+- Do not modify `AI/PLAN.md` during implementation unless the plan is impossible. If that happens, explain it in `AI/IMPLEMENTATION.md`.
