@@ -1,9 +1,11 @@
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local ZombieConfig = require(ReplicatedStorage.Shared.ZombieConfig)
 local HordeConfig = require(ReplicatedStorage.Shared.HordeConfig)
+local CollisionGroups = require(ReplicatedStorage.Shared.CollisionGroups)
 local Assets = ReplicatedStorage:WaitForChild("Assets")
 
 local Zombie = {}
@@ -64,6 +66,9 @@ local function createRig(spawnPosition)
 			if descendant.Parent then descendant:Destroy() end
 		elseif descendant:IsA("BasePart") then
 			descendant.Anchored = false
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = true
 		end
 	end
 
@@ -80,10 +85,27 @@ local function createRig(spawnPosition)
 	humanoid.WalkSpeed = ZombieConfig.WalkSpeed
 	humanoid.BreakJointsOnDeath = false
 	model:PivotTo(CFrame.new(spawnPosition))
-	return model, root, humanoid
+	local collider = Instance.new("Part")
+	collider.Name = "ZombieCollider"
+	collider.Size = Vector3.new(2.2, 4.8, 1.8)
+	collider.CFrame = root.CFrame
+	collider.Transparency = 1
+	collider.CastShadow = false
+	collider.CanCollide = true
+	collider.CanTouch = true
+	collider.CanQuery = false
+	collider.Massless = false
+	collider.CollisionGroup = CollisionGroups.Zombies
+	collider.CustomPhysicalProperties = PhysicalProperties.new(2.5, 1, 0, 100, 100)
+	collider.Parent = model
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = root
+	weld.Part1 = collider
+	weld.Parent = collider
+	return model, root, humanoid, collider
 end
 
-local function loadLocomotionTrack(animator, animations, name, priority)
+local function loadAnimationTrack(animator, animations, name, priority, looped)
 	local animation = animations and animations:FindFirstChild(name)
 	if not animation or not animation:IsA("Animation") or animation.AnimationId == "" then
 		return nil
@@ -94,7 +116,7 @@ local function loadLocomotionTrack(animator, animations, name, priority)
 	if not success then
 		return nil
 	end
-	track.Looped = true
+	track.Looped = looped
 	track.Priority = priority
 	return track
 end
@@ -103,7 +125,7 @@ function Zombie.spawn(spawnPosition, onDiedCallback)
 	if typeof(spawnPosition) ~= "Vector3" then
 		return nil
 	end
-	local model, root, humanoid = createRig(spawnPosition)
+	local model, root, humanoid, collider = createRig(spawnPosition)
 	if not model then
 		return nil
 	end
@@ -112,7 +134,7 @@ function Zombie.spawn(spawnPosition, onDiedCallback)
 
 	local dead = false
 	local lastAttackTime = 0
-	local idleTrack, walkTrack
+	local idleTrack, walkTrack, deathTrack
 	local moving = nil
 	local function setMoving(shouldMove)
 		if moving == shouldMove then
@@ -133,9 +155,22 @@ function Zombie.spawn(spawnPosition, onDiedCallback)
 		end
 		dead = true
 		model:SetAttribute("IsDead", true)
-		if idleTrack then idleTrack:Stop(0) end
-		if walkTrack then walkTrack:Stop(0) end
-		root.Anchored = true
+		collider.CanCollide = false
+		collider.CanTouch = false
+		-- Cleanup is scheduled before any animation or callback work.
+		task.delay(HordeConfig.CorpseCleanupDelay, function()
+			if model.Parent then
+				model:Destroy()
+			end
+		end)
+		if onDiedCallback then
+			local success, failure = pcall(onDiedCallback, model)
+			if not success then warn("[Zombie] Death callback failed:", failure) end
+		end
+		if idleTrack then pcall(function() idleTrack:Stop(0) end) end
+		if walkTrack then pcall(function() walkTrack:Stop(0) end) end
+		humanoid.WalkSpeed = 0
+		humanoid:MoveTo(root.Position)
 		for _, descendant in model:GetDescendants() do
 			if descendant:IsA("BasePart") then
 				descendant.CanCollide = false
@@ -143,12 +178,36 @@ function Zombie.spawn(spawnPosition, onDiedCallback)
 				descendant.CanQuery = false
 			end
 		end
-		if onDiedCallback then
-			onDiedCallback(model)
-		end
-		task.delay(HordeConfig.CorpseCleanupDelay, function()
+		task.spawn(function()
+			local success, failure = pcall(function()
+				local played = false
+				if deathTrack then
+					played = pcall(function() deathTrack:Play(0.05) end)
+				end
+				if played then
+					local start = os.clock()
+					local length = deathTrack.Length
+					while length <= 0 and os.clock() - start < 0.5 and model.Parent do
+						task.wait()
+						length = deathTrack.Length
+					end
+					if length > 0.1 then
+						task.wait(math.max(0, length - 0.08 - (os.clock() - start)))
+						if model.Parent and deathTrack.IsPlaying then
+							deathTrack.TimePosition = math.max(0, length - 0.08)
+							deathTrack:AdjustSpeed(0)
+							RunService.Heartbeat:Wait()
+						end
+					else
+						task.wait(0.5)
+					end
+			end
+			end)
+			if not success then warn("[Zombie] Death pose freeze failed:", failure) end
 			if model.Parent then
-				model:Destroy()
+				for _, descendant in model:GetDescendants() do
+					if descendant:IsA("BasePart") then descendant.Anchored = true end
+				end
 			end
 		end)
 	end
@@ -169,9 +228,10 @@ function Zombie.spawn(spawnPosition, onDiedCallback)
 		animator.Parent = humanoid
 	end
 	local animations = model:FindFirstChild("Animations")
-	idleTrack = loadLocomotionTrack(animator, animations, "Idle", Enum.AnimationPriority.Idle)
-	walkTrack = loadLocomotionTrack(animator, animations, "Walk", Enum.AnimationPriority.Movement)
-		or loadLocomotionTrack(animator, animations, "Run", Enum.AnimationPriority.Movement)
+	idleTrack = loadAnimationTrack(animator, animations, "Idle", Enum.AnimationPriority.Idle, true)
+	walkTrack = loadAnimationTrack(animator, animations, "Walk", Enum.AnimationPriority.Movement, true)
+		or loadAnimationTrack(animator, animations, "Run", Enum.AnimationPriority.Movement, true)
+	deathTrack = loadAnimationTrack(animator, animations, "DeathAnimation", Enum.AnimationPriority.Action4, false)
 	if not dead then
 		setMoving(false)
 	end

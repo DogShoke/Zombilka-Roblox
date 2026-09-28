@@ -2,11 +2,19 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local PistolConfig = require(ReplicatedStorage.Shared.PistolConfig)
+local CollisionGroups = require(ReplicatedStorage.Shared.CollisionGroups)
 
 local PistolServer = {}
 local lastShotTimes = {}
 local reloadTokens = {}
 local initializedPlayers = {}
+local characterPartConnections = {}
+
+local function assignPlayerPart(instance)
+	if instance:IsA("BasePart") then
+		instance.CollisionGroup = CollisionGroups.Players
+	end
+end
 
 local function livingCharacter(player)
 	local character = player.Character
@@ -48,6 +56,13 @@ local function setupPlayer(player)
 	end
 	initializedPlayers[player] = true
 	local function onCharacterAdded(character)
+		if characterPartConnections[player] then
+			characterPartConnections[player]:Disconnect()
+		end
+		for _, descendant in character:GetDescendants() do
+			assignPlayerPart(descendant)
+		end
+		characterPartConnections[player] = character.DescendantAdded:Connect(assignPlayerPart)
 		resetAmmo(player)
 		local humanoid = character:WaitForChild("Humanoid")
 		humanoid.Died:Connect(function()
@@ -139,6 +154,10 @@ function PistolServer.start(firePistol, reloadPistol)
 	reloadPistol.OnServerEvent:Connect(onReload)
 	Players.PlayerAdded:Connect(setupPlayer)
 	Players.PlayerRemoving:Connect(function(player)
+		if characterPartConnections[player] then
+			characterPartConnections[player]:Disconnect()
+			characterPartConnections[player] = nil
+		end
 		lastShotTimes[player] = nil
 		reloadTokens[player] = nil
 		initializedPlayers[player] = nil

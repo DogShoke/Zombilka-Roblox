@@ -1,6 +1,20 @@
 return {
-	CameraOffset = CFrame.new(0, -1.2, -1.5),
-	PistolOffset = CFrame.new(0, -0.08, -0.15) * CFrame.Angles(0, math.rad(180), 0),
+	CameraOffset = CFrame.new(0.35, -1.35, -0.2),
+	RightGripC0 = CFrame.new(0, -0.15, -0.1) * CFrame.Angles(math.rad(-90), 0, 0),
+	RightGripC1 = CFrame.identity,
 	RecoilKick = CFrame.new(0, 0.03, 0.08) * CFrame.Angles(math.rad(2.5), 0, 0),
 	RecoilRecoverySpeed = 12,
+	BobSmoothingSpeed = 10,
+	WalkBobFrequency = 8.5,
+	WalkBobHorizontal = 0.035,
+	WalkBobVertical = 0.02,
+	SprintBobFrequency = 13.0,
+	SprintBobHorizontal = 0.065,
+	SprintBobVertical = 0.045,
+	SprintLowerOffset = CFrame.new(-0.03, -0.12, 0.04) * CFrame.Angles(math.rad(-6), math.rad(4), math.rad(-2)),
+	AnimationIds = {
+		Idle = "rbxassetid://105188840604362",
+		Fire = "",
+		Reload = "",
+	},
 }
