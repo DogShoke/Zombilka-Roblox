@@ -1,353 +1,478 @@
-# Plan: Movement + Horde Polish
+# Plan: FPS Rig Migration + Headshots + Talent Prototype
 
-## 1. Existing implementation assessment
+## 1. Actual Fps Rig asset inspection findings
 
-The codebase currently has a functional combat vertical slice:
-- Client: First-person camera, animatable viewmodel with character arms, custom `PistolIdle` animation (`rbxassetid://105188840604362`), semi-auto pistol firing, auto-reload, and ammo display.
-- Server: Server-authoritative raycasting, damage (25 dmg per body hit), zombie AI pursuit, and horde spawner.
-- Zombie: Cloned R15 rig from `ReplicatedStorage.Assets.Zombie` playing `Idle`, `Walk`/`Run`, and `DeathAnimation`.
+Binary inspection of `assets/Fps Rig/FpsGlock.fbx` (1.36 MB, Kaydara FBX Binary, version 7400) reveals:
+- **Meshes Present**:
+  - `ArmModel`: Skinned mesh containing the complete first-person arms and hands.
+  - `Glock19`: Complete 3D pistol model with separate movable parts.
+- **Skeletal / Armature Hierarchy**:
+  - `Armature`
+    - Left Arm Chain: `UpperArm.L` → `LowerArm.L` → `Hand.L` → finger bones (`DoubleFingersBeginning`, `DoubleFingers.L`, `DoubleFingersTip.L`).
+    - Right Arm Chain: `UpperArm.R.001` → `LowerArm.R.001` → `Hand.R.001` → finger bones.
+    - Weapon Bone Chain: `Root` (weapon root bone) → `Slide`, `Trigger`, `Magazine`, `SlideCatch`.
+- **Embedded Animation Stacks (5 Clips)**:
+  1. `Armature|Idle` — looped stationary idle holding pose.
+  2. `Armature|Shoot` — firing impulse with slide recoil blowback.
+  3. `Armature|Reload` — full tactical reload sequence animating hands, slide, and magazine ejection/insertion.
+  4. `Armature|Inspect` — weapon inspection rotation.
+  5. `Armature|Grip` — base grip alignment pose.
+- **Rig Suitability Assessment**:
+  The rig is a self-contained, professionally rigged FPS asset where both arms and weapon mechanisms share a unified armature. The slide, trigger, and magazine are already rigged to dedicated bones. It is 100% suitable as our complete primary first-person viewmodel.
 
-However, testing revealed specific mechanical and visual issues:
-1. **Zombie Death Standing Glitch**: When a zombie reaches 0 HP, `DeathAnimation` plays once, but when the unlooped animation track reaches its end, Roblox's Animator stops applying it. For the remaining ~1.8s until `Destroy()`, the rig snaps back to an upright standing pose.
-2. **Zombie Physics Instability & Player Launching**: When the player sprints or runs into a living zombie, collision between the player and the zombie's 15 dynamic R15 parts pushes or launches the zombie across the map.
-3. **Player Movement Speed**: Player is locked to default `WalkSpeed = 16` with no sprint mechanic.
-4. **Static Viewmodel Movement**: The viewmodel holds `PistolIdle` statically while running, lacking movement feel.
-5. **Horde Pressure**: The spawner caps at 15 zombies with slow ramp-up (`InitialMaxAlive = 3`, `DifficultyStepSeconds = 25`).
+## 2. Manual Roblox import requirements
 
-## 2. Exact death animation final-pose strategy
+> [!IMPORTANT]
+> Raw FBX files in the repository cannot be used directly as live Roblox instances by Rojo. They must be imported into Roblox Studio using the native 3D Importer and converted to a `.rbxm` model before runtime code can clone them.
 
-### The Bug Cause:
-Roblox `AnimationTrack`s with `Looped = false` automatically transition to `Stopped` state when they reach their length. Once stopped, the Animator stops writing transforms to the Motor6Ds, causing the joint hierarchy to immediately snap back to default neutral rest pose (standing upright).
+### Step-by-Step Developer Import Guide:
+1. Launch Roblox Studio and open the project place (connected to Rojo).
+2. Go to **Avatar** (or **Home**) tab → click **3D Importer** (or Import 3D).
+3. Select `assets/Fps Rig/FpsGlock.fbx`.
+4. In the 3D Importer settings:
+   - Rig Type: Verify it detects a custom Rig / Model with bones.
+   - Animations: Check **Import Animations** (ensure `Idle`, `Shoot`, `Reload`, and `Inspect` are checked).
+   - Textures: Import embedded textures/materials.
+   - Click **Import**.
+5. Studio creates a Model in `Workspace` containing:
+   - `AnimationController` and `Animator`.
+   - `ArmModel` and `Glock19` MeshParts with Bone hierarchy.
+   - Nested `Animation` objects for each clip.
+6. **Publish Animations**:
+   - For each imported animation (`Idle`, `Shoot`, `Reload`), right-click → **Save to Roblox** (Publish Animation).
+   - Copy the generated `rbxassetid://...` IDs.
+   - Enter them into `src/client/ViewmodelConfig.luau` (`AnimationIds.Idle`, `Fire`, `Reload`).
+7. **Save Model as RBXM**:
+   - Right-click the imported Model in Workspace → **Save to File...**
+   - Save directly to `assets/FpsGlock.rbxm`.
+   - Rojo will instantly synchronize this into `ReplicatedStorage.Assets.FpsGlock`!
 
-### The Fix:
-1. Load `DeathAnimation` with `Looped = false` and `Priority = Enum.AnimationPriority.Action4`.
-2. In `onDeath()`:
-   - Call `deathTrack:Play(0.05)`.
-   - Freeze the track at its final frame before it stops:
-     ```luau
-     task.spawn(function()
-         local length = deathTrack.Length
-         local start = os.clock()
-         while length <= 0 and os.clock() - start < 0.5 do
-             task.wait()
-             length = deathTrack.Length
-         end
-         if length > 0.1 then
-             task.wait(math.max(0.05, length - 0.08))
-             if deathTrack.IsPlaying and model.Parent then
-                 deathTrack.TimePosition = math.max(0, length - 0.08)
-                 deathTrack:AdjustSpeed(0)
-             end
-         end
-         -- Anchor all parts at the final death pose
-         for _, descendant in model:GetDescendants() do
-             if descendant:IsA("BasePart") then
-                 descendant.Anchored = true
-             end
-         end
-     end)
-     ```
-3. **Why this works**:
-   - `deathTrack:AdjustSpeed(0)` pauses the animation while keeping `IsPlaying = true`. It never reaches the end, so the engine never fires `Stopped` and continues evaluating the final keyframe permanently.
-   - Anchoring all BaseParts physically locks the corpse in place on the ground, making it impossible for physics or motor joints to stand back up.
-4. **Fallback Safety**:
-   - If `deathTrack` fails to load, `pcall` catches the error, and `task.delay(HordeConfig.CorpseCleanupDelay, ...)` still destroys the corpse cleanly after 3 seconds.
+## 3. New runtime viewmodel architecture
 
-## 3. Exact collider hierarchy & physics stability
+- **Cloning Source**: `ReplicatedStorage.Assets:WaitForChild("FpsGlock")`.
+- **Placement**: Client-only clone parented to `workspace.CurrentCamera`.
+- **Part Configuration**:
+  - Traverse all BaseParts in the clone:
+    - `CanCollide = false`, `CanTouch = false`, `CanQuery = false`.
+    - `CastShadow = false`, `Massless = true`.
+  - Identify root part (`Root` or PrimaryPart) and set `Anchored = true`. All articulate bone-driven MeshParts remain `Anchored = false`.
+- **Camera Following**:
+  - In `RenderStepped`, position root part:
+    ```luau
+    viewmodelRoot.CFrame = camera.CFrame * Config.CameraOffset * currentBobOffset * recoilOffset
+    ```
+- **Local Character Invisibility**:
+  - Maintain `LocalTransparencyModifier = 1` on real character limbs on spawn and per-frame.
 
-### The Problem:
-Having 15 separate R15 MeshParts colliding with a player creates dozens of friction contact points and torque impulses on Motor6D joints. The client-owned player physics easily overcomes the server-owned zombie joints, launching the zombie into the air.
+## 4. Exact old-viewmodel removal/migration strategy
 
-### The Solution:
-1. **Disable Collision on Visual Parts**:
-   Set `CanCollide = false` and `CanTouch = false` on all 15 R15 body parts (`Head`, `UpperTorso`, `LowerTorso`, arms, legs, and `HumanoidRootPart`).
-   Leave `CanQuery = true` on visual parts so server hitscan raycasts hit the zombie model accurately.
-2. **Dedicated Single Collider Part**:
-   Create an invisible part named `ZombieCollider` inside the zombie model:
-   - Shape: Block
-   - Size: `Vector3.new(2.2, 4.8, 1.8)` (encapsulates the torso and legs)
-   - CFrame: `root.CFrame`
-   - `Transparency = 1`, `CastShadow = false`
-   - `CanCollide = true`, `CanTouch = true`, `CanQuery = false` (server raycasts ignore it and hit visual parts)
-   - `Massless = false`
-   - `CollisionGroup = "Zombies"`
-   - `CustomPhysicalProperties`:
-     ```luau
-     PhysicalProperties.new(
-         2.5, -- Density (heavy enough that player cannot push or launch it)
-         1.0, -- Friction (prevents sliding)
-         0.0, -- Elasticity (zero bounciness; absorbs impact completely)
-         100, -- FrictionWeight
-         100  -- ElasticityWeight
-     )
-     ```
-   - Welded to `HumanoidRootPart` via a `WeldConstraint`:
-     `Part0 = root, Part1 = collider, Parent = collider`.
-3. **Immediate Death Passthrough**:
-   On death in `onDeath()`:
-   ```luau
-   local collider = model:FindFirstChild("ZombieCollider")
-   if collider and collider:IsA("BasePart") then
-       collider.CanCollide = false
-   end
-   ```
-   The player can immediately walk or sprint through the dying corpse without snagging or tripping.
+1. **Retire from `ViewmodelController.luau`**:
+   - Remove `cloneCharacter()` and `character.Archivable` hacks.
+   - Remove `keptParts` and R15 character arm extraction loops.
+   - Remove synthetic `RightGrip` creation and manual `preparePistol()` logic.
+   - Remove fallback procedural rest pose math (the imported `Idle` clip handles the holding stance natively).
+2. **Retire from `ViewmodelConfig.luau`**:
+   - Remove obsolete `RightGripC0` and `RightGripC1`.
+   - Remove old R15 `PistolIdle` ID (`rbxassetid://105188840604362`).
+3. **Repository Assets**:
+   - `assets/Pistol.rbxm` and `assets/Arms.rbxm` remain untouched in Git as archival backups, but are no longer referenced at runtime.
 
-## 4. PhysicsService collision group matrix
+## 5. Animation playback strategy
 
-Define collision group constants in `src/shared/CollisionGroups.luau`:
+- **Idle**:
+  - Loaded with `Priority = Enum.AnimationPriority.Idle`, `Looped = true`.
+  - Begins playing automatically as soon as the viewmodel is spawned.
+- **Fire (`Shoot`)**:
+  - Loaded with `Priority = Enum.AnimationPriority.Action`, `Looped = false`.
+  - Triggered in `ViewmodelController.playFireFeedback()`.
+  - Plays the slide blowback and arm impulse animation alongside procedural recoil kick.
+- **Reload**:
+  - Loaded with `Priority = Enum.AnimationPriority.Action`, `Looped = false`.
+  - Triggered when `player:GetAttribute("PistolReloading") == true`.
+  - **Playback Speed Synchronization**:
+    If the animation clip duration (`track.Length`) differs from gameplay `PistolConfig.ReloadDuration` (1.5s), calculate:
+    ```luau
+    local speed = if track.Length > 0 then (track.Length / PistolConfig.ReloadDuration) else 1
+    track:AdjustSpeed(speed)
+    track:Play(0.05)
+    ```
+    This guarantees the visual reload finishes in precisely 1.5 seconds without modifying authoritative server gameplay timing.
+- **Failure Resilience**:
+  - All track loading and playback calls are wrapped in `pcall`. If animation IDs are missing or fail to load, shooting, aiming, and server raycasting continue unimpeded.
+
+---
+
+## 6. Headshot integration
+
+- Hitscan validation runs exclusively on the server in `PistolServer.luau`.
+- Server performs `workspace:Raycast(head.Position, aimDirection.Unit * PistolConfig.Range, params)`.
+- When a hit occurs:
+  ```luau
+  local hitPart = result.Instance
+  local isHeadshot = (hitPart.Name == "Head")
+  ```
+- **Damage Formula**:
+  - Base damage = `25`.
+  - Headshot multiplier = `2.0`.
+  - Base hit = `25` damage (4 shots to kill 80 HP zombie).
+  - Headshot hit = `50` damage (2 shots to kill 80 HP zombie).
+- Client never sends headshot flags; the server computes this strictly from the physical part intersected by the raycast.
+
+## 7. Combat event/modifier flow
+
+To prevent `PistolServer.luau` from bloating into an unmaintainable monolith, hit processing is delegated to `src/server/CombatService.luau`:
+
+```mermaid
+sequenceDiagram
+    participant Client as PistolController (Client)
+    participant Server as PistolServer (Server)
+    participant Combat as CombatService (Server)
+    participant Target as Zombie Humanoid
+
+    Client->>Server: FirePistol(lookVector)
+    Server->>Server: Validate Ammo, Rate & Raycast
+    Server->>Combat: ProcessHit(player, targetModel, hitPart, hitPosition)
+    Combat->>Combat: Check isHeadshot (hitPart.Name == "Head")
+    Combat->>Combat: Calculate Modifiers (Talent Multipliers, Vulnerability)
+    Combat->>Target: TakeDamage(finalDamage)
+    Combat->>Combat: Dispatch Hooks: onHit, onHeadshot, onKill, onHeadshotKill
+    Combat->>Server: Return CombatContext (Damage, Killed, Headshot)
+```
+
+### Context Schema:
 ```luau
-return {
-    Default = "Default",
-    Players = "Players",
-    Zombies = "Zombies",
+type CombatContext = {
+    Player: Player,
+    Target: Model,
+    HitPart: BasePart,
+    IsHeadshot: boolean,
+    BaseDamage: number,
+    FinalDamage: number,
+    Killed: boolean,
+    HitPosition: Vector3,
+    WeaponId: string,
 }
 ```
 
-### Server Registration (`src/server/init.server.luau`):
-On server startup:
-```luau
-local PhysicsService = game:GetService("PhysicsService")
-local CollisionGroups = require(ReplicatedStorage.Shared.CollisionGroups)
+## 8. XP & level formula
 
-local function registerGroups()
-    for _, group in { CollisionGroups.Players, CollisionGroups.Zombies } do
-        pcall(function()
-            PhysicsService:RegisterCollisionGroup(group)
-        end)
-    end
-    PhysicsService:CollisionGroupSetCollidable(CollisionGroups.Players, CollisionGroups.Default, true)
-    PhysicsService:CollisionGroupSetCollidable(CollisionGroups.Zombies, CollisionGroups.Default, true)
-    PhysicsService:CollisionGroupSetCollidable(CollisionGroups.Players, CollisionGroups.Zombies, true)
-    PhysicsService:CollisionGroupSetCollidable(CollisionGroups.Zombies, CollisionGroups.Zombies, false)
-    PhysicsService:CollisionGroupSetCollidable(CollisionGroups.Players, CollisionGroups.Players, false)
-end
+- **Per-Run Progression**: State resets on new server session (no persistent DataStore).
+- **Kill Reward**: `ZombieKillXP = 10`.
+- **Threshold Formula**:
+  $$\text{RequiredXP}(\text{level}) = 30 + ((\text{level} - 1) \times 10)$$
+  - Level 1 → 2: 30 XP (3 kills)
+  - Level 2 → 3: 40 XP (4 kills)
+  - Level 3 → 4: 50 XP (5 kills)
+  - Level 4 → 5: 60 XP (6 kills)
+- **Replication via Player Attributes**:
+  - `PlayerLevel`: `number` (default 1)
+  - `PlayerXP`: `number` (default 0)
+  - `PlayerRequiredXP`: `number` (default 30)
+  - `PendingTalentChoices`: `number` (default 0)
+- **Anti-Duplication**:
+  Each zombie model receives attribute `XPAwarded = true` on death. XP cannot be awarded more than once per zombie instance.
+
+## 9. Player run-state/stat architecture
+
+Implemented in `src/server/ProgressionService.luau`:
+```luau
+type PlayerCombatStats = {
+    BaseDamageMultiplier: number,       -- default 1.0
+    HeadshotDamageMultiplier: number,   -- default 1.0 (multiplies 2.0x base headshot)
+    ReloadDurationMultiplier: number,   -- default 1.0 (1.0 = normal, 0.8 = -20% duration)
+    MagazineBonus: number,              -- default 0 (+4, +8)
+    MaxHealthBonus: number,             -- default 0 (+20, +40)
+    PiercingCount: number,              -- default 0 (bullets pierce N extra zombies)
+    DeadeyeStreak: number,              -- default 0 (consecutive headshots)
+    CombatReloadBonus: number?,         -- temporary next-reload reduction
+    OwnedTalents: { [string]: { Tier: string, Count: number } },
+    VoltaBoonCount: number,             -- prerequisite tracking
+}
 ```
+- Fully server-authoritative.
+- Modifiers calculate dynamically through `ProgressionService.getStats(player)`.
 
-### Collision Matrix:
-| Group A | Group B | Collidable | Effect |
-| :--- | :--- | :---: | :--- |
-| `Players` | `Default` | **YES** | Players collide with terrain, baseplate, walls |
-| `Zombies` | `Default` | **YES** | Zombies walk on floors and collide with walls |
-| `Players` | `Zombies` | **YES** | **Living zombies solidly block the player from walking through them** |
-| `Zombies` | `Zombies` | **NO** | **Zombies do NOT push or fling each other; hordes swarm cleanly** |
-| `Players` | `Players` | **NO** | Friendly players do not block or shove each other |
+## 10. Talent definitions & schema
 
-### Group Assignment:
-- **Zombies**: `ZombieCollider.CollisionGroup = CollisionGroups.Zombies`.
-- **Players**: In `PistolServer.luau`, when player spawns, assign `CollisionGroup = CollisionGroups.Players` to all character BaseParts (`HumanoidRootPart`, `UpperTorso`, `LowerTorso`, `Head`).
-
-## 5. Network ownership strategy
-
-- `root:SetNetworkOwner(nil)` is called in `Zombie.spawn()` immediately after parenting the model to `workspace`.
-- Ensures the server retains strict authority over the zombie's physics simulation. The client physics engine cannot claim ownership during player contact, preventing client-side pushing or fling glitches.
-
-## 6. Sprint architecture
-
-### Modular Controller (`src/client/SprintController.luau`):
-- Centralizes sprinting logic cleanly without cluttering `PistolController` or `init.client`.
-- Constants:
-  - `NormalWalkSpeed = 16`
-  - `SprintWalkSpeed = 24`
-- Input Handling:
-  - Listens to `UserInputService.InputBegan` for `Enum.KeyCode.LeftShift`.
-  - Listens to `UserInputService.InputEnded` for `Enum.KeyCode.LeftShift`.
-  - Respects `gameProcessed` (does not sprint if player is typing in chat).
-  - Resets to normal speed when `GuiService.MenuOpened` or window focus is lost.
-- Lifecycle:
-  - Tracks `isSprinting` state.
-  - On sprint start: checks living humanoid (`humanoid.Health > 0`); sets `humanoid.WalkSpeed = SprintWalkSpeed`.
-  - On sprint end: sets `humanoid.WalkSpeed = NormalWalkSpeed`.
-  - On character death/respawn: resets `isSprinting = false`, restores `humanoid.WalkSpeed = NormalWalkSpeed`.
-- API:
-  - `SprintController.start()`
-  - `SprintController.isSprinting(): boolean` (queried by `ViewmodelController` for sprint bob)
-
-## 7. Walk/sprint bob formula and config values
-
-### Configuration (`src/client/ViewmodelConfig.luau`):
+Defined in `src/shared/TalentDefinitions.luau`:
 ```luau
--- Procedural Movement Bobbing
-BobSmoothingSpeed = 10,
-WalkBobFrequency = 8.5,
-WalkBobHorizontal = 0.035,
-WalkBobVertical = 0.02,
-SprintBobFrequency = 13.0,
-SprintBobHorizontal = 0.065,
-SprintBobVertical = 0.045,
-SprintLowerOffset = CFrame.new(-0.03, -0.12, 0.04) * CFrame.Angles(math.rad(-6), math.rad(4), math.rad(-2)),
-```
+type TalentTier = {
+    Rarity: "Blue" | "Purple" | "Red" | "Gold",
+    Description: string,
+    Values: { [string]: number },
+}
 
-### Calculation in `ViewmodelController.luau`:
-Every frame in `RenderStepped`:
-1. Check horizontal movement velocity:
-   ```luau
-   local root = character and character:FindFirstChild("HumanoidRootPart")
-   local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-   local velocity = if root then Vector3.new(root.AssemblyLinearVelocity.X, 0, root.AssemblyLinearVelocity.Z).Magnitude else 0
-   local isMoving = velocity > 1.5 and humanoid and humanoid.MoveDirection.Magnitude > 0.1
-   local isSprinting = isMoving and SprintController.isSprinting()
-   ```
-2. Accumulate bob cycle:
-   - If `isMoving`:
-     `bobCycle += dt * (if isSprinting then Config.SprintBobFrequency else Config.WalkBobFrequency)`
-   - If not moving:
-     `bobCycle` slowly settles to 0.
-3. Compute sway and bounce:
-   - Horizontal sway: `math.sin(bobCycle) * (if isSprinting then Config.SprintBobHorizontal else Config.WalkBobHorizontal)`
-   - Vertical bounce: `math.cos(bobCycle * 2) * (if isSprinting then Config.SprintBobVertical else Config.WalkBobVertical)`
-   - Roll tilt: `math.sin(bobCycle) * (if isSprinting then Config.SprintBobHorizontal * 0.4 else Config.WalkBobHorizontal * 0.4)`
-   - Target CFrame:
-     ```luau
-     local bobCFrame = if isMoving then CFrame.new(swayX, bounceY, 0) * CFrame.Angles(0, 0, rollZ) else CFrame.identity
-     local sprintCFrame = if isSprinting then Config.SprintLowerOffset else CFrame.identity
-     local targetBob = bobCFrame * sprintCFrame
-     currentBobOffset = currentBobOffset:Lerp(targetBob, math.clamp(dt * Config.BobSmoothingSpeed, 0, 1))
-     ```
-4. Layering on Viewmodel:
-   ```luau
-   viewmodelRoot.CFrame = camera.CFrame * Config.CameraOffset * currentBobOffset * recoilOffset
-   ```
-   Camera CFrame, server raycast origin (`Head.Position`), and crosshair remain 100% untouched.
-
-## 8. HordeConfig changes
-
-Update `src/shared/HordeConfig.luau`:
-```luau
-return {
-	InitialMaxAlive = 5,
-	MaximumMaxAlive = 25,
-	InitialSpawnInterval = 3.0,
-	MinimumSpawnInterval = 0.7,
-	DifficultyStepSeconds = 20,
-	MaxAliveIncreasePerStep = 2,
-	SpawnIntervalDecreasePerStep = 0.4,
-	CorpseCleanupDelay = 3.0,
-	MinSpawnRadius = 55,
-	MaxSpawnRadius = 95,
-	MinPlayerSpawnDistance = 50,
-	MinZombieSeparation = 12,
-	MaxSpawnAttempts = 10,
-	ArenaRadiusLimit = 220,
+type TalentDefinition = {
+    Id: string,
+    Name: string,
+    Category: "Neutral" | "Professor Volta" | "Sergeant Bravo",
+    Tiers: {
+        Blue: TalentTier?,
+        Purple: TalentTier?,
+        Red: TalentTier?,
+        Gold: TalentTier?,
+    },
+    Prerequisites: { RequiredTalents: { string }?, MinCategoryCount: number? }?,
+    OnSelected: ((player: Player, tier: string) -> ())?,
 }
 ```
 
-### Progression curve:
-- **0s**: 5 zombies, 3.0s spawn interval
-- **20s**: 7 zombies, 2.6s spawn interval
-- **40s**: 9 zombies, 2.2s spawn interval
-- **60s**: 11 zombies, 1.8s spawn interval
-- **80s**: 13 zombies, 1.4s spawn interval
-- **100s**: 15 zombies, 1.0s spawn interval
-- **120s**: 17 zombies, 0.7s spawn interval (minimum interval reached)
-- **140s**: 19 zombies
-- **160s**: 21 zombies
-- **180s**: 23 zombies
-- **200s (3m 20s)**: 25 zombies (maximum cap reached)
+## 11. Rarity and roll rules
 
-## 9. Files to create
+- **Rarities**:
+  - `Blue` (Rare): Core building blocks.
+  - `Purple` (Epic): Enhanced tier.
+  - `Red` (Mythic): Prerequisite-gated game-changers.
+  - `Gold` (Legendary): Excluded from normal level-up rolls.
+- **Roll Weights (per Altar slot)**:
+  - Base: 75% Blue, 25% Purple.
+  - If a slot rolls and the player satisfies prerequisites for an unowned Red (Mythic) talent: 15% promotion chance to offer that Mythic talent.
+- **Anti-Duplicate & Max-Tier Filtering**:
+  - The 3 altars never offer duplicate talents in the same roll.
+  - If player already owns Purple (max tier) of a talent, it is excluded from future rolls.
+  - If player owns Blue of a talent, only the Purple upgrade is offered.
 
-1. `src/shared/CollisionGroups.luau`:
-   - Centralizes collision group names (`Default`, `Players`, `Zombies`).
-2. `src/client/SprintController.luau`:
-   - Manages LeftShift sprint input, `WalkSpeed` transitions, respawn cleanup, and sprint state query.
+## 12. Upgrade/stacking rules
 
-## 10. Files to modify
+- Talents have a single active tier at a time.
+- Upgrading Blue → Purple overwrites the magnitude (e.g. Sharpshooter Blue +25% → Purple +45%; they do **not** stack additively to +70%).
+- Mythics are unique and cannot be rolled or upgraded further once owned.
 
-1. `src/shared/HordeConfig.luau`:
-   - Updated horde density and progression values.
-2. `src/server/init.server.luau`:
-   - Registers PhysicsService collision groups and defines non-collidable rules for Zombies-vs-Zombies and Players-vs-Players.
-3. `src/server/Zombie.luau`:
-   - Creates `ZombieCollider` with zero elasticity and solid mass.
-   - Disables collisions on visual R15 body parts while keeping `CanQuery = true`.
-   - Freezes `DeathAnimation` on its final frame and anchors corpse parts on death.
-   - Disables collider collision instantly upon death.
-4. `src/server/PistolServer.luau`:
-   - Assigns `CollisionGroup = CollisionGroups.Players` to spawned player characters.
-5. `src/client/ViewmodelConfig.luau`:
-   - Adds procedural walk and sprint bobbing parameters and sprint lowered offset.
-6. `src/client/ViewmodelController.luau`:
-   - Layers procedural movement and sprint bobbing smoothly atop `CameraOffset`.
-7. `src/client/init.client.luau`:
-   - Starts `SprintController.start()`.
+## 13. All 12 prototype talents
 
-## 11. Files that remain unchanged
+### Neutral Talents
+1. **Sharpshooter**:
+   - Blue: +25% Headshot Damage.
+   - Purple: +45% Headshot Damage.
+2. **Quick Hands**:
+   - Blue: Reload duration -20% (1.2s reload).
+   - Purple: Reload duration -35% (0.975s reload).
+3. **Extended Magazine**:
+   - Blue: +4 magazine capacity (16 total).
+   - Purple: +8 magazine capacity (20 total).
+4. **Vitality**:
+   - Blue: +20 MaxHealth (120 HP total).
+   - Purple: +40 MaxHealth (140 HP total).
 
-- `default.project.json`
+### Professor Volta (Lightning & Shock)
+5. **Arc Discharge**:
+   - Blue: On headshot, chain lightning strikes 1 nearby living zombie within 18 studs for 20 damage.
+   - Purple: Chain lightning strikes up to 2 nearby living zombies for 25 damage.
+   - *Safety*: Chain hits do not trigger secondary chain recursion or duplicate kill XP.
+6. **Static Shock**:
+   - Blue: Headshot has 20% chance to shock/stun target for 1.0s (`WalkSpeed = 0`).
+   - Purple: 35% chance to stun target for 1.5s.
+   - *Safety*: Restores `WalkSpeed` safely using a timestamp token; death clears stun immediately.
+7. **Conductive Target**:
+   - Purple-only: Shocked enemies take +25% damage from all damage sources while stunned.
+8. **Tesla Cascade** (Red / Mythic):
+   - *Prerequisites*: Player owns `Arc Discharge` AND at least one other Volta boon (`Static Shock` or `Conductive Target`).
+   - *Effect*: Arc Discharge chain lightning jumps to +3 additional zombies (up to 4–5 total).
+   - *Safety*: Visited zombie tracking prevents hitting the same enemy twice per cascade.
+
+### Sergeant Bravo (Ballistics & Piercing)
+9. **AP Core**:
+   - Blue: Bullet pierces 1 additional zombie along trajectory.
+   - Purple: Bullet pierces 2 additional zombies.
+   - *Implementation*: Raycast iterates through hit zombie models using `RaycastParams.FilterDescendantsInstances` exclusion until piercing count is exhausted.
+10. **Large Caliber**:
+    - Blue: +20% base bullet damage (30 dmg).
+    - Purple: +35% base bullet damage (33.75 dmg).
+11. **Combat Reload**:
+    - Blue: On headshot kill, next reload duration is reduced by -30% (consumed on reload).
+    - Purple: Next reload duration is reduced by -50%.
+12. **Deadeye** (Red / Mythic):
+    - Red / Mythic.
+    - Consecutive headshots grant +10% headshot damage per hit (up to max +50%, 5 stacks).
+    - Hitting a body shot or missing resets the streak to 0.
+
+---
+
+## 14. Mythic prerequisite logic
+
+- Checked server-side during Altar roll generation:
+  ```luau
+  local function isEligible(player, talentDef): boolean
+      if not talentDef.Prerequisites then return true end
+      local stats = ProgressionService.getStats(player)
+      if talentDef.Prerequisites.RequiredTalents then
+          for _, reqId in talentDef.Prerequisites.RequiredTalents do
+              if not stats.OwnedTalents[reqId] then return false end
+          end
+      end
+      if talentDef.Prerequisites.MinCategoryCount then
+          local count = 0
+          for id in stats.OwnedTalents do
+              if TalentDefinitions[id].Category == talentDef.Category then
+                  count += 1
+              end
+          end
+          if count < talentDef.Prerequisites.MinCategoryCount then return false end
+      end
+      return true
+  end
+  ```
+
+## 15. Three physical Talent Altars
+
+- **World Placement**:
+  Three pedestal models situated on the Baseplate in an arc near player spawn:
+  - Altar 1: `Vector3.new(-8, 2, 20)`
+  - Altar 2: `Vector3.new(0, 2, 22)`
+  - Altar 3: `Vector3.new(8, 2, 20)`
+- **Visual Display**:
+  - Pedestal BasePart (Anchored, CanCollide).
+  - Overhead BillboardGui / SurfaceGui:
+    - Talent Name (Bold, GothamFont).
+    - Category / Patron tag.
+    - Rarity Badge with distinct border & text color:
+      - Blue: `Color3.fromRGB(50, 160, 255)`
+      - Purple: `Color3.fromRGB(185, 75, 255)`
+      - Red: `Color3.fromRGB(255, 60, 60)`
+    - Formatted description of bonuses.
+- **Interaction**:
+  - Each altar contains a `ProximityPrompt`:
+    - `ActionText = "Choose Talent"`
+    - `HoldDuration = 0.6`
+    - `RequiresLineOfSight = false`
+    - `MaxActivationDistance = 10`
+
+## 16. Server-side validation
+
+When a player triggers an Altar's `ProximityPrompt`:
+1. Server verifies player is alive and character is in workspace.
+2. Server verifies `player:GetAttribute("PendingTalentChoices") > 0`.
+3. Server verifies the altar has an active offered talent.
+4. Server grants the talent, updates `PlayerCombatStats`, applies stat modifiers (e.g. MaxHealth, Magazine size).
+5. Server decrements `PendingTalentChoices -= 1`.
+6. Server clears all 3 altars.
+7. If `PendingTalentChoices > 0`, server immediately rolls 3 new choices for the remaining pending level-up.
+
+## 17. Debug / test mode
+
+In `src/shared/TalentConfig.luau`:
+```luau
+return {
+    DebugMode = false, -- set true in Studio to test specific tiers
+    DebugRollSlots = {
+        Slot1 = "Blue",
+        Slot2 = "Purple",
+        Slot3 = "Red", -- bypasses prerequisites for immediate testing
+    },
+    FastLeveling = false, -- 1 kill = 1 level
+}
+```
+
+---
+
+## 18. Files to create
+
+### Phase A:
+- *None.* (Uses existing `ViewmodelController.luau` and `ViewmodelConfig.luau`).
+
+### Phase B:
+1. `src/shared/TalentDefinitions.luau` — Complete definitions of the 12 prototype talents, tiers, stats, and prerequisites.
+2. `src/shared/TalentConfig.luau` — Roll weights, debug mode settings, altar positions.
+3. `src/shared/ProgressionConfig.luau` — Kill XP values and leveling formulas.
+4. `src/server/CombatService.luau` — Centralized hitscan damage calculation, headshot evaluation, and talent hook dispatch.
+5. `src/server/ProgressionService.luau` — XP accumulation, level threshold calculation, player combat stat tracking.
+6. `src/server/TalentAltars.luau` — Spawns physical altar pedestals, manages rolling, renders displays, and validates ProximityPrompts.
+
+## 19. Files to modify
+
+### Phase A:
+1. `default.project.json` — verify `assets/` maps to `ReplicatedStorage.Assets`.
+2. `src/client/ViewmodelConfig.luau` — set `FpsGlock` camera offsets, recoil parameters, and animation IDs (`Idle`, `Fire`, `Reload`).
+3. `src/client/ViewmodelController.luau` — replace character-clone arms with `ReplicatedStorage.Assets.FpsGlock` clone, wire `Idle`, `Fire`, and `Reload` animation tracks.
+
+### Phase B:
+4. `src/shared/PistolConfig.luau` — add `HeadshotMultiplier = 2.0`.
+5. `src/server/PistolServer.luau` — route raycast hits through `CombatService.processHit()`; update magazine size from player stats.
+6. `src/server/Zombie.luau` — award kill XP to credited player on death; support shock stun without walkspeed corruption.
+7. `src/server/init.server.luau` — initialize `ProgressionService` and `TalentAltars`.
+
+## 20. Files to leave unchanged
+
 - `src/client/Crosshair.luau`
 - `src/client/AmmoGui.luau`
 - `src/client/PistolController.luau`
-- `src/server/ZombieSpawner.luau` (already uses values from `HordeConfig`)
-- `src/shared/PistolConfig.luau`
+- `src/client/SprintController.luau`
+- `src/server/ZombieSpawner.luau`
 - `src/shared/ZombieConfig.luau`
+- `src/shared/HordeConfig.luau`
+- `src/shared/CollisionGroups.luau`
 - `src/shared/Remotes.luau`
-- All binary assets in `assets/`
+- Raw assets in `assets/Fps Rig/` and `assets/Fps Rig AKM/`
 
-## 12. Implementation order
+---
 
-1. **Shared Configuration & Groups**:
-   - Create `src/shared/CollisionGroups.luau`.
-   - Update `src/shared/HordeConfig.luau` with new density targets.
-2. **Server Collision Groups & Player Setup**:
-   - Update `src/server/init.server.luau` with `PhysicsService` registration.
-   - Update `src/server/PistolServer.luau` to set player parts to `Players` collision group.
-3. **Zombie Collider & Death Pose**:
-   - Update `src/server/Zombie.luau`: build `ZombieCollider`, disable visual part collisions, implement death freeze via `AdjustSpeed(0)` + delayed anchor, and disable collider immediately on death.
-4. **Player Sprint**:
-   - Create `src/client/SprintController.luau`.
-   - Update `src/client/init.client.luau` to call `SprintController.start()`.
-5. **Viewmodel Bobbing**:
-   - Update `src/client/ViewmodelConfig.luau` with bob parameters.
-   - Update `src/client/ViewmodelController.luau` to calculate velocity, query sprint state, and apply smooth bobbing in `RenderStepped`.
-6. **Verification**:
-   - Check git diff, verify no syntax errors, and test in Roblox Studio.
+## 21. Phase A implementation order
 
-## 13. Runtime edge cases & mitigations
+1. **Studio Asset Import**: Developer imports `assets/Fps Rig/FpsGlock.fbx` via Studio 3D Importer, publishes animations, and saves model as `assets/FpsGlock.rbxm`.
+2. **Viewmodel Configuration**: Configure `ViewmodelConfig.luau` with new animation IDs and tuned `CameraOffset`.
+3. **Viewmodel Controller Refactor**: Clean out old character-clone and `RightGrip` code from `ViewmodelController.luau`; clone `FpsGlock`; connect `Idle`, `Fire`, and `Reload` tracks.
+4. **Phase A Studio Test**: Verify new Glock and arms follow camera, loop idle, play fire on LMB, play reload on R/auto-reload.
+5. **Phase A Commit**: Commit Phase A code cleanly.
 
-1. **Player dies while sprinting**:
-   - *Risk*: Respawning keeps sprint speed active or glitches `WalkSpeed`.
-   - *Mitigation*: `SprintController` listens to `humanoid.Died` and resets `isSprinting = false`. On `CharacterAdded`, `humanoid.WalkSpeed` is strictly set to `NormalWalkSpeed (16)`.
-2. **Zombie dies in direct physical contact with player**:
-   - *Risk*: Player gets stuck or snagged on the dying corpse.
-   - *Mitigation*: In `Zombie.luau`, `onDeath()` immediately sets `ZombieCollider.CanCollide = false`. The player can run right through the collapsing corpse.
-3. **Death animation takes time to load from CDN**:
-   - *Risk*: `deathTrack.Length` is 0 initially.
-   - *Mitigation*: Polling loop waits up to 0.5s for length to populate; if still unknown, a fallback timer anchors parts after 1.0s.
-4. **Player presses LeftShift while typing in chat**:
-   - *Risk*: Sprint activates unintentionally during chat.
-   - *Mitigation*: `UserInputService.InputBegan` checks `if gameProcessed then return end`.
-5. **Rapid firing while sprinting**:
-   - *Risk*: Viewmodel recoil and sprint bobbing conflict.
-   - *Mitigation*: `bobOffset` and `recoilOffset` are multiplicative CFrame offsets (`CameraOffset * currentBobOffset * recoilOffset`). They combine smoothly without jitter.
+## 22. Phase A Studio checklist
 
-## 14. Manual Studio verification checklist
+- [ ] New Glock and arms appear cleanly in first-person view.
+- [ ] No old character arm geometry or floating parts appear.
+- [ ] `Idle` animation loops smoothly while stationary.
+- [ ] Clicking LMB fires, plays `Fire` animation, and applies cosmetic recoil.
+- [ ] Pressing R plays `Reload` animation, completes in 1.5s, and fills magazine.
+- [ ] Walking and sprinting bobbing function smoothly on top of new rig.
+- [ ] Server shooting, zombie pursuit, and damage remain completely functional.
 
-1. **Zombie Death Pose**:
-   - Shoot and kill a zombie.
-   - Verify `DeathAnimation` plays, collapses to the ground, and **freezes on the ground**.
-   - Verify the corpse **does NOT stand back up** during the 3 seconds before being destroyed.
-2. **Zombie Collision & Blocking**:
-   - Walk and run directly into a living zombie.
-   - Verify the zombie acts as a solid physical obstacle that stops/blocks the player.
-   - Verify the zombie is NOT pushed, slid, launched into the sky, or flung across the baseplate.
-3. **Swarm Stability**:
-   - Let 5–10 zombies cluster around the player.
-   - Verify zombies do not ping-pong, collide violently, or launch each other (Zombies-vs-Zombies non-collidable).
-4. **Corpse Passthrough**:
-   - Kill a zombie directly in front of you.
-   - Verify you can immediately walk or sprint through the falling/dead corpse without obstruction.
-5. **Player Sprinting**:
-   - Press and hold `LeftShift`: verify character accelerates to `WalkSpeed = 24`.
-   - Release `LeftShift`: verify character smoothly decelerates to `WalkSpeed = 16`.
-   - Die to a zombie: verify respawn starts cleanly at normal walk speed (16).
-6. **Viewmodel Bobbing**:
-   - Stand still: viewmodel holds authored `PistolIdle` pose.
-   - Walk: viewmodel demonstrates subtle vertical bounce and horizontal sway.
-   - Sprint: viewmodel demonstrates faster bobbing and a subtle lowered weapon offset.
-   - Shoot while sprinting: verify recoil kick plays on top of bobbing, crosshair remains stable, and shots register accurately on server.
-7. **Horde Escalation**:
-   - Observe initial spawn: 5 zombies appear.
-   - Survive 2–3 minutes: verify horde escalates steadily up to 25 zombies with rapid 0.7s spawns.
-8. **Output Cleanliness**:
-   - Confirm Output log contains no repeating errors or warnings.
+---
+
+## 23. Phase B implementation order
+
+1. **Shared Definitions**: Create `ProgressionConfig.luau`, `TalentDefinitions.luau`, and `TalentConfig.luau`.
+2. **Combat Service & Headshots**: Create `CombatService.luau` with `HeadshotMultiplier = 2.0`; route `PistolServer.luau` raycast hits through it.
+3. **XP & Progression**: Create `ProgressionService.luau`; update `Zombie.luau` to award XP on kill and trigger level-ups.
+4. **Physical Altars**: Create `TalentAltars.luau` to construct the 3 pedestals, display rolled talents, and handle `ProximityPrompt` selection.
+5. **Talent Implementations**: Implement the 12 prototype talents (stats, lightning chain, stun, piercing ray, streak counters).
+6. **Phase B Studio Test**: Verify headshots deal 50 damage, XP accrues, altars spawn on level-up, and all 12 talents apply effects correctly.
+7. **Phase B Commit**: Commit Phase B code cleanly.
+
+## 24. Phase B Studio checklist
+
+- [ ] Raycast to zombie head deals 50 damage (kills 80 HP zombie in 2 shots).
+- [ ] Raycast to zombie torso/legs deals 25 damage (4 shots to kill).
+- [ ] Killing zombies awards 10 XP; XP bar/attributes update properly.
+- [ ] Reaching 30 XP triggers level-up and populates the 3 physical altars.
+- [ ] Holding E on an altar grants the talent and updates player stats immediately.
+- [ ] Altars clear and do not permit duplicate claims.
+- [ ] Arc Discharge / Tesla Cascade chains lightning without crashing or infinite loops.
+- [ ] AP Core bullet pierces through front zombie into rear zombie.
+- [ ] Deadeye builds streak on consecutive headshots and resets on body hit/miss.
+- [ ] Output window remains free of runtime errors.
+
+---
+
+## 25. Risks and edge cases
+
+1. **FBX scale discrepancy**:
+   - *Risk*: Imported FBX model is microscopic or enormous in Studio.
+   - *Mitigation*: 3D Importer allows setting File Scale or Model:ScaleTo() to normalize dimensions to ~2 studs.
+2. **Reload animation duration mismatch**:
+   - *Risk*: Imported reload clip is 2.5s while server reload duration is 1.5s.
+   - *Mitigation*: Dynamically adjust animation speed via `track:AdjustSpeed(track.Length / 1.5)` so visual reload matches server timing exactly.
+3. **Infinite lightning recursion**:
+   - *Risk*: Arc Discharge / Tesla Cascade chains back and forth between two zombies forever.
+   - *Mitigation*: Maintain a `visitedTargets` table; each zombie can be struck at most once per shot. Secondary hits cannot trigger new chains.
+4. **Stun state persisting after death**:
+   - *Risk*: Static Shock sets `WalkSpeed = 0`, and zombie dies or respawns with 0 speed.
+   - *Mitigation*: Check `humanoid.Health > 0` before restoring speed; death cleanup destroys the instance.
+5. **Piercing ray infinite loop**:
+   - *Risk*: Piercing raycast hits the same part repeatedly.
+   - *Mitigation*: Accumulate all hit zombie models into `params.FilterDescendantsInstances` array and cast from `result.Position + rayDir * 0.1`.
+
+## 26. Definition of done
+
+- Phase A: First-person viewmodel cleanly uses the imported `FpsGlock` rig with working `Idle`, `Fire`, and `Reload` animations, fully retiring the old R15 character viewmodel.
+- Phase B: Server accurately detects headshots (50 dmg vs 25 body dmg), awards run-based XP, triggers level-ups, and operates three interactive physical Talent Altars.
+- All 12 prototype talents function with Blue/Purple/Red tiers and prerequisite validation.
+- All gameplay authority remains strictly server-side.
+- Zero errors or warnings in Studio Output.

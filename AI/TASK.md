@@ -1,88 +1,116 @@
-# Task: Movement + Horde Polish
+# Task: FPS Rig Migration + Headshots + Talent Prototype
 
 ## Goal
 
-Polish core gameplay feel and presentation across five targeted systems: freeze zombie corpses in their final death pose (eliminating the standing glitch), create a stable physics collision system where living zombies block players without getting launched, implement a LeftShift sprint system, add procedural walk/sprint viewmodel bobbing while preserving authored animations, and increase horde density and pressure.
+Execute a two-phase milestone that:
+1. **Phase A**: Migrates the client-side FPS presentation to the ready-made animated Glock FPS rig (`assets/Fps Rig/FpsGlock.fbx`), retiring the temporary character-cloned arms and establishing full `Idle`, `Fire`, and `Reload` animation integration.
+2. **Phase B**: Implements the foundation of combat progression with server-authoritative headshots, run-based XP and leveling, three physical in-world Talent Altars, and a 12-talent prototype system featuring Neutral, Professor Volta (lightning/stun), and Sergeant Bravo (piercing/damage) talents with Blue (Rare), Purple (Epic), and Red (Mythic) rarities.
 
 ---
 
-## Requirements
+## Phase A Requirements — New FPS Rig Migration
 
-### 1. Zombie Death Pose Freeze
-- When a zombie reaches 0 HP, play `DeathAnimation` once.
-- Freeze and hold the corpse on its exact final death frame for the duration of `CorpseCleanupDelay` (3.0s).
-- The corpse must NEVER visually snap back to an upright standing or rest pose before destruction.
-- Animation loading failures or missing tracks must not crash the server or prevent corpse cleanup.
-- Do not implement a full ragdoll system.
+### 1. Ready-Made Animated FPS Rig
+- Inspect and import `assets/Fps Rig/FpsGlock.fbx`:
+  - Single skeletal rig containing both arms (`UpperArm`, `LowerArm`, `Hand`, fingers) and weapon bones (`Root`, `Slide`, `Trigger`, `Magazine`, `SlideCatch`).
+  - Embedded animation stacks: `Idle`, `Shoot` (Fire), `Reload`, `Inspect`, and `Grip`.
+- Must be imported through Roblox Studio's 3D Importer and saved as a live `.rbxm` (`assets/FpsGlock.rbxm`), mapped through Rojo to `ReplicatedStorage.Assets.FpsGlock`.
+- Publish the imported animation clips to obtain valid `rbxassetid://` IDs for `Idle`, `Fire`, and `Reload`.
 
-### 2. Zombie Collision & Player Blocking
-- Living zombies must physically collide with and block player movement (prevent phasing through enemies).
-- Living zombies must NOT be launched, pushed, or become physics projectiles upon contact with sprinting players.
-- Set all visual R15 body parts of the zombie (`Head`, `Torso`, arms, legs) to `CanCollide = false`.
-- Create a single dedicated invisible `ZombieCollider` BasePart welded to `HumanoidRootPart`:
-  - `CanCollide = true`, `CanTouch = true`, `CanQuery = false` (server raycasts still hit R15 limbs).
-  - Configured with `CustomPhysicalProperties`: high friction (1.0), zero elasticity (0.0), and solid density (2.5) to absorb impulses.
-- Use `PhysicsService` collision groups:
-  - `Players` collides with `Zombies` = `true` (solid blocking).
-  - `Zombies` collides with `Zombies` = `false` (prevents physics ping-ponging and swarm clumping explosions).
-  - `Players` collides with `Players` = `false`.
-- Ensure server network ownership (`root:SetNetworkOwner(nil)`).
-- When a zombie dies, immediately disable `ZombieCollider.CanCollide` so players can smoothly walk over corpses.
-- Do NOT anchor living zombies.
+### 2. Viewmodel Architecture & Old Rig Removal
+- Replace the character-clone R15 viewmodel in `src/client/ViewmodelController.luau` with a single client-only clone of `ReplicatedStorage.Assets.FpsGlock`.
+- Remove old character-part cloning, synthetic `RightGrip` creation, and `assets/Arms.rbxm` dependencies.
+- Configure all viewmodel parts with cosmetic properties: `CanCollide = false`, `CanTouch = false`, `CanQuery = false`, `CastShadow = false`, `Massless = true`.
+- Anchor only the root part; maintain `CurrentCamera` following in `RenderStepped` with `CameraOffset`, movement bob, and recoil kick.
+- Real character limbs remain locally hidden (`LocalTransparencyModifier = 1`).
 
-### 3. Player Sprint (LeftShift)
-- Holding `LeftShift` increases player movement speed from `WalkSpeed = 16` to `SprintSpeed = 24`.
-- Releasing `LeftShift` returns `WalkSpeed` to `16`.
-- Clean reset upon character death and respawn (spawns at default walk speed).
-- Clean handling of window unfocus or menu open.
-- Expose sprint state to client systems for viewmodel motion.
-- Do NOT implement stamina in this milestone.
+### 3. Animation Playback Integration
+- Play `Idle` looped at `Enum.AnimationPriority.Idle`.
+- Play `Fire` (`Shoot`) at `Enum.AnimationPriority.Action` on accepted LMB clicks.
+- Play `Reload` at `Enum.AnimationPriority.Action` when reload starts, scaled to match gameplay `ReloadDuration` (1.5s).
+- Visual animation timing must never dictate server gameplay or ammo authority.
 
-### 4. Cosmetic Viewmodel Movement & Sprint Bob
-- Keep the authored `PistolIdle` animation (`rbxassetid://105188840604362`); do NOT modify hand poses.
-- Add procedural viewmodel motion on top of the existing `CameraOffset`:
-  - **Idle**: almost no motion.
-  - **Walking**: subtle sinusoidal vertical bounce and horizontal sway matching footstep pace.
-  - **Sprinting**: faster, more pronounced bob with an optional subtle lowered weapon offset.
-- Motion must be purely cosmetic:
-  - Camera CFrame, crosshair position, aim direction, and server hitscan raycasts must NOT be affected.
-- All bob frequencies, amplitudes, and offsets must be centralized in `ViewmodelConfig.luau`.
+---
 
-### 5. Horde Density & Escalation Tuning
-- Increase horde pressure moderately while respecting R15 server performance:
-  - `InitialMaxAlive = 5` (up from 3)
-  - `MaximumMaxAlive = 25` (up from 15)
-  - `InitialSpawnInterval = 3.0` (down from 4.0)
-  - `MinimumSpawnInterval = 0.7` (down from 1.0)
-  - `DifficultyStepSeconds = 20` (down from 25)
-  - `MaxAliveIncreasePerStep = 2`
-  - `SpawnIntervalDecreasePerStep = 0.4`
-- Maintain existing 15-stud zombie spawn separation and 50-stud player spawn distance.
-- Maintain existing deferred escalation timer that begins strictly when the first living player enters the game.
+## Phase B Requirements — Headshots, Progression & Talents
+
+### 1. Server-Authoritative Headshot System
+- In hitscan raycasting, determine headshots strictly on the server: `hitPart.Name == "Head"`.
+- Never accept client-provided headshot flags.
+- Apply `HeadshotMultiplier = 2.0` (25 base body damage, 50 headshot damage).
+
+### 2. Combat Event / Modifier Architecture
+- Centralize hit processing into a server `CombatService`:
+  - Input: Attacker, Target, HitPart, BaseDamage, WeaponId, HitPosition.
+  - Computes modifiers (headshot multiplier, talent damage bonuses, vulnerability).
+  - Applies damage to Humanoid.
+  - Dispatches hooks: `onHit`, `onHeadshot`, `onKill`, `onHeadshotKill`.
+
+### 3. XP & Leveling Progression
+- Run-based progression (no persistent DataStore).
+- `ZombieKillXP = 10`. Prevent duplicate XP awards from the same zombie.
+- Level-up requirement formula: `RequiredXP(level) = 30 + ((level - 1) * 10)`.
+- Replicate `PlayerLevel`, `PlayerXP`, `PlayerRequiredXP`, and `PendingTalentChoices` via Player Attributes.
+- Reaching threshold increments level, grants a pending talent choice, and triggers Altar roll.
+
+### 4. Talent Rarities & Roster (12 Prototype Talents)
+- Rarities: Blue (Rare, 75%), Purple (Epic, 25%), Red (Mythic, prerequisite-gated), Gold (Legendary, excluded from normal rolls).
+- Upgrades: Obtaining Purple replaces Blue magnitude (does not stack additively).
+- **Neutral**:
+  1. *Sharpshooter*: +25% (Blue) / +45% (Purple) Headshot Damage.
+  2. *Quick Hands*: -20% (Blue) / -35% (Purple) Reload Duration.
+  3. *Extended Magazine*: +4 (Blue) / +8 (Purple) Magazine Capacity.
+  4. *Vitality*: +20 (Blue) / +40 (Purple) MaxHealth.
+- **Professor Volta**:
+  5. *Arc Discharge*: On headshot, chain lightning damages 1 (Blue, 20 dmg) / 2 (Purple, 25 dmg) nearby zombies within 18 studs.
+  6. *Static Shock*: Headshot has 20% (Blue, 1.0s) / 35% (Purple, 1.5s) chance to stun target.
+  7. *Conductive Target* (Purple-only): Shocked enemies take +25% damage from all sources.
+  8. *Tesla Cascade* (Red / Mythic): Prerequisite: owns Arc Discharge + 1 Volta boon. Chain lightning bounces to +3 additional zombies (capped, no duplicate hits).
+- **Sergeant Bravo**:
+  9. *AP Core*: Bullets pierce 1 (Blue) / 2 (Purple) additional zombies.
+  10. *Large Caliber*: +20% (Blue) / +35% (Purple) Base Damage.
+  11. *Combat Reload*: Headshot kill grants -30% (Blue) / -50% (Purple) duration to the next reload.
+  12. *Deadeye* (Red / Mythic): Consecutive headshots grant +10% headshot damage per hit (max +50%). Body hits or misses reset streak.
+
+### 5. Physical Talent Altars
+- Three physical pedestal models placed on the Baseplate.
+- Each altar displays Talent Name, Category, Rarity Badge, and Description via BillboardGui/SurfaceGui.
+- Interacted with via `ProximityPrompt` ("Select Talent", 0.6s hold).
+- Server validates that the player has pending choices, grants the chosen talent, consumes one choice, clears the altars, and re-rolls if choices remain.
+- Client cannot select arbitrary talent IDs; selection is verified server-side.
+
+### 6. Test & Debug Mode
+- Configurable `TalentConfig.DebugMode = true` to force specific rarities (e.g. Altar 1 = Blue, Altar 2 = Purple, Altar 3 = Mythic) and 1-kill level-up for rapid Studio validation.
 
 ---
 
 ## Non-Negotiable Architecture Constraints
 
-- **Server Authority**: Weapon hitscan, ammo, damage, health, zombie AI, spawner progression, and collision group definitions remain 100% server-authoritative.
-- **Cosmetic Independence**: Viewmodel bob and recoil are purely visual client transforms layered atop `CurrentCamera`.
-- **Out of Scope**: No stamina, no map redesign, no PathfindingService rewrite, no new weapons, no new zombie types, no multiplayer.
+- **Two Separate Commits**: Phase A (FPS Rig Migration) must be implemented and tested first before Phase B (Headshots + Talents).
+- **Server Authority**: Damage calculation, headshot validation, talent ownership, XP grants, and prompt validation remain 100% server-authoritative.
+- **No Client Manipulation**: The client never determines headshot state, XP, or talent grants.
+- **Out of Scope**: Do NOT implement AKM, stamina, map redesign, PathfindingService rewrite, or multiplayer.
 
 ---
 
 ## Acceptance Criteria
 
-1. Killing a zombie plays `DeathAnimation`, freezes on the final death frame on the ground, and remains completely dead until cleanly destroyed after ~3 seconds.
-2. Zombie corpses NEVER snap back to an upright standing pose.
-3. Players cannot walk through living zombies; running into a zombie physically halts/blocks the player.
-4. Running or sprinting into a zombie does not launch, fling, or bounce the zombie across the map.
-5. Zombies in a horde do not bounce off or push each other into physics explosions.
-6. Dying zombies immediately lose collision, allowing players to walk through corpses.
-7. Holding LeftShift increases player speed to 24; releasing returns speed to 16.
-8. Player death and respawn resets sprint state cleanly without speed glitches.
-9. First-person viewmodel plays custom `PistolIdle` stance continuously while stationary.
-10. Walking produces light, smooth procedural viewmodel bobbing.
-11. Sprinting produces faster, stronger bobbing with a subtle lowered weapon offset.
-12. Firing while moving or sprinting still applies recoil kick and hits accurately on server raycasts.
-13. Horde starts with 5 zombies and scales up to 25 zombies over ~3.5 minutes with spawn interval reducing to 0.7s.
-14. Roblox Studio Output remains free of errors and warnings.
+### Phase A:
+1. `assets/Fps Rig/FpsGlock.fbx` is imported via Roblox Studio and synced as `assets/FpsGlock.rbxm`.
+2. First-person viewmodel cleanly renders the new Glock rig and arms.
+3. Old character-cloned viewmodel is fully retired with zero residual artifacts.
+4. `Idle` animation loops continuously in first person.
+5. Firing plays `Shoot` animation and procedural recoil kick.
+6. Reloading plays `Reload` animation synchronized to 1.5s.
+7. Shooting and reloading remain fully functional on the server.
+
+### Phase B:
+8. Headshots hit `Head` and deal 50 damage (2.0x multiplier), killing 80 HP zombies in 2 shots.
+9. Body shots continue dealing 25 damage (4 shots to kill).
+10. Killing zombies awards 10 XP; leveling up grants 1 pending choice.
+11. Three physical altars appear with Blue/Purple/Red talent options.
+12. Selecting an altar grants the talent, updates player stats, and applies effects immediately.
+13. Arc Discharge / Tesla Cascade chains lightning without infinite recursion.
+14. AP Core pierces additional zombies along the ray trajectory.
+15. Deadeye builds consecutive headshot stacks and resets on body shot/miss.
+16. Roblox Studio Output log remains completely free of errors.
