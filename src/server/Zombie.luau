@@ -7,6 +7,8 @@ local ZombieConfig = require(ReplicatedStorage.Shared.ZombieConfig)
 local HordeConfig = require(ReplicatedStorage.Shared.HordeConfig)
 local CollisionGroups = require(ReplicatedStorage.Shared.CollisionGroups)
 local Assets = ReplicatedStorage:WaitForChild("Assets")
+local CombatService = require(script.Parent:WaitForChild("CombatService"))
+local TalentService = require(script.Parent:WaitForChild("TalentService"))
 
 local Zombie = {}
 
@@ -166,6 +168,7 @@ function Zombie.spawn(spawnPosition, onDiedCallback)
 				model:Destroy()
 			end
 		end)
+		pcall(TalentService.clearShock, model)
 		if onDiedCallback then
 			local success, failure = pcall(onDiedCallback, model)
 			if not success then warn("[Zombie] Death callback failed:", failure) end
@@ -252,9 +255,14 @@ function Zombie.spawn(spawnPosition, onDiedCallback)
 					local now = os.clock()
 					if now - lastAttackTime >= ZombieConfig.AttackCooldown
 						and humanoid.Health > 0 and targetHumanoid.Health > 0
+						and not TalentService.isShocked(model)
 						and character:IsDescendantOf(workspace)
 						and (targetRoot.Position - root.Position).Magnitude <= ZombieConfig.AttackRange then
 						lastAttackTime = now
+						local attackedPlayer = Players:GetPlayerFromCharacter(character)
+						if attackedPlayer then
+							CombatService.onDamageTaken(attackedPlayer, ZombieConfig.AttackDamage, model)
+						end
 						targetHumanoid:TakeDamage(ZombieConfig.AttackDamage)
 					end
 				end

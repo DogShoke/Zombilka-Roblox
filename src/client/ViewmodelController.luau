@@ -171,11 +171,15 @@ end
 playReload = function()
 	local track = tracks.Reload
 	if not track or not viewmodel then return end
+	local actualDuration = player:GetAttribute("PistolReloadDuration")
+	if typeof(actualDuration) ~= "number" or actualDuration <= 0 then
+		actualDuration = PistolConfig.ReloadDuration
+	end
 	reloadToken += 1
 	local token = reloadToken
 	local success = pcall(function()
 		if track.IsPlaying then track:Stop(0) end
-		local speed = if track.Length > 0 then track.Length / PistolConfig.ReloadDuration else 1
+		local speed = if track.Length > 0 then track.Length / actualDuration else 1
 		track:Play(0.05, 1, speed)
 	end)
 	if not success then
@@ -184,13 +188,13 @@ playReload = function()
 	end
 	if track.Length <= 0 then
 		task.spawn(function()
-			local deadline = os.clock() + PistolConfig.ReloadDuration
+			local deadline = os.clock() + actualDuration
 			while reloadToken == token and track.IsPlaying and track.Length <= 0 and os.clock() < deadline do
 				task.wait()
 			end
 			if reloadToken == token and track.IsPlaying and track.Length > 0 then
 				pcall(function()
-					track:AdjustSpeed(track.Length / PistolConfig.ReloadDuration)
+					track:AdjustSpeed(track.Length / actualDuration)
 				end)
 			end
 		end)

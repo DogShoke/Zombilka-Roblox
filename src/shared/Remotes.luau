@@ -23,13 +23,19 @@ function Remotes.initServer()
 		reloadPistol.Name = "ReloadPistol"
 		reloadPistol.Parent = folder
 	end
+	local combatFeedback = folder:FindFirstChild("CombatFeedback")
+	if not combatFeedback then
+		combatFeedback = Instance.new("RemoteEvent")
+		combatFeedback.Name = "CombatFeedback"
+		combatFeedback.Parent = folder
+	end
 
-	return firePistol, reloadPistol
+	return firePistol, reloadPistol, combatFeedback
 end
 
 function Remotes.getClient()
 	local folder = ReplicatedStorage:WaitForChild("Remotes")
-	return folder:WaitForChild("FirePistol"), folder:WaitForChild("ReloadPistol")
+	return folder:WaitForChild("FirePistol"), folder:WaitForChild("ReloadPistol"), folder:WaitForChild("CombatFeedback")
 end
 
 return Remotes

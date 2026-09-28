@@ -73,7 +73,8 @@ function PistolController.start()
 			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 			if humanoid and humanoid.Health > 0
 				and player:GetAttribute("PistolReloading") ~= true
-				and (player:GetAttribute("PistolMagazine") or PistolConfig.MagazineSize) < PistolConfig.MagazineSize then
+				and (player:GetAttribute("PistolMagazine") or PistolConfig.MagazineSize)
+					< (player:GetAttribute("PistolMaxMagazine") or PistolConfig.MagazineSize) then
 				requestReload()
 			end
 		end
