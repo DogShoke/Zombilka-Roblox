@@ -69,6 +69,9 @@ local function createRig(spawnPosition)
 			descendant.CanCollide = false
 			descendant.CanTouch = false
 			descendant.CanQuery = true
+			if descendant.Name ~= "HumanoidRootPart" then
+				descendant.Transparency = 0
+			end
 		end
 	end
 

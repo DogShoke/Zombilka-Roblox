@@ -1,7 +1,5 @@
 return {
-	CameraOffset = CFrame.new(0.35, -1.35, -0.2),
-	RightGripC0 = CFrame.new(0, -0.15, -0.1) * CFrame.Angles(math.rad(-90), 0, 0),
-	RightGripC1 = CFrame.identity,
+	CameraOffset = CFrame.new(0.15, -0.95, -1.3) * CFrame.Angles(0, math.rad(-90), 0),
 	RecoilKick = CFrame.new(0, 0.03, 0.08) * CFrame.Angles(math.rad(2.5), 0, 0),
 	RecoilRecoverySpeed = 12,
 	BobSmoothingSpeed = 10,
@@ -13,8 +11,10 @@ return {
 	SprintBobVertical = 0.045,
 	SprintLowerOffset = CFrame.new(-0.03, -0.12, 0.04) * CFrame.Angles(math.rad(-6), math.rad(4), math.rad(-2)),
 	AnimationIds = {
-		Idle = "rbxassetid://105188840604362",
-		Fire = "",
-		Reload = "",
+		Idle = "rbxassetid://105345463794666",
+		Shoot = "rbxassetid://128130246447749",
+		Reload = "rbxassetid://130294402000435",
+		Grip = "rbxassetid://93225329241822",
+		Inspect = "rbxassetid://115095786328194",
 	},
 }
