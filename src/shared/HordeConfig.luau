@@ -1,0 +1,16 @@
+return {
+	InitialMaxAlive = 3,
+	MaximumMaxAlive = 15,
+	InitialSpawnInterval = 4.0,
+	MinimumSpawnInterval = 1.0,
+	DifficultyStepSeconds = 25,
+	MaxAliveIncreasePerStep = 2,
+	SpawnIntervalDecreasePerStep = 0.5,
+	CorpseCleanupDelay = 3.0,
+	MinSpawnRadius = 55,
+	MaxSpawnRadius = 95,
+	MinPlayerSpawnDistance = 50,
+	MinZombieSeparation = 12,
+	MaxSpawnAttempts = 10,
+	ArenaRadiusLimit = 220,
+}

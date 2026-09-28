@@ -16,5 +16,11 @@ GuiService.MenuClosed:Connect(function()
 end)
 
 local Crosshair = require(script:WaitForChild("Crosshair"))
+local PistolController = require(script:WaitForChild("PistolController"))
+local AmmoGui = require(script:WaitForChild("AmmoGui"))
+local ViewmodelController = require(script:WaitForChild("ViewmodelController"))
 
 Crosshair.mount()
+PistolController.start()
+AmmoGui.mount()
+ViewmodelController.start()

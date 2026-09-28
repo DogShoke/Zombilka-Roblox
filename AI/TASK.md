@@ -1,368 +1,103 @@
-# Task: Pistol + Basic Zombie Combat Vertical Slice
+# Task: Visual Combat Pass + Horde Gameplay Fixes
 
 ## Goal
 
-Create the first complete combat loop for Zombilka.
+Upgrade the combat prototype from temporary block visuals to imported 3D assets and fix core Horde gameplay issues.
 
-The player should be able to fight one basic zombie using one pistol.
+The gameplay must feature permanent zombie pursuit for single-player, spawn separation to eliminate clumping, and auto-reload on empty fire.
 
-The zombie must be able to chase and attack the player, receive pistol damage, and die.
-
-This is a vertical slice, not the final production weapon or enemy system.
+The visuals must integrate the imported R15 Zombie rig, FPS Arms, and visible Pistol viewmodel while keeping all gameplay authority strictly on the server.
 
 ---
 
-## Pistol requirements
+## Gameplay Requirements
 
-Implement one pistol.
+### 1. Permanent Zombie Pursuit (Single-Player)
+- The game is currently single-player: one player versus the horde.
+- Every living zombie must permanently pursue the single living player.
+- Distance must NOT prevent target acquisition (remove `DetectionRange`).
+- If the player is alive:
+  - Zombies continuously navigate toward the player's `HumanoidRootPart` unless within melee `AttackRange`.
+- If the player is dead:
+  - Zombies halt movement and cease attacks immediately.
+- After player respawn:
+  - All living zombies automatically reacquire the new Character and resume pursuit.
+- Keep `AttackRange` (4.5 studs) for melee strikes.
 
-Controls:
+### 2. Spawn Separation
+- Eliminate zombie stacking and overlapping spawns on the Baseplate.
+- Replace fixed coordinates with a procedural ring algorithm:
+  - Calculate candidate positions around the living player at a configurable radius (`MinSpawnRadius = 55`, `MaxSpawnRadius = 95`).
+  - Require candidate distance from player >= `MinPlayerSpawnDistance` (50 studs).
+  - Require candidate distance from all living zombies >= `MinZombieSeparation` (12 studs).
+  - Make up to `MaxSpawnAttempts` (10) attempts per spawn cycle.
+  - If no candidate satisfies separation, skip the spawn for that cycle (do NOT force overlapping spawns).
+- Maintain the hard alive zombie cap (15) and minimum spawn interval (1.0s).
 
-- Left Mouse Button: fire
-- R: reload
-
-Behavior:
-
-- semi-automatic
-- one shot per click
-- hitscan / raycast-based shooting
-- configurable damage
-- configurable range
-- configurable fire rate / minimum time between shots
-- magazine ammunition
-- reserve ammunition
-- reload duration
-- cannot fire while reloading
-- cannot fire with an empty magazine
-- reload cannot exceed magazine capacity
-- reserve ammo decreases correctly
-
-Use reasonable prototype values.
-
-For example, values may be around:
-
-- magazine: 12
-- reserve: 60
-- damage: enough that several body shots kill the prototype zombie
-
-Exact balance values are not important yet.
-
-Keep weapon statistics in a sensible configuration location rather than scattering magic numbers across scripts.
+### 3. Auto-Reload on Empty Fire
+- If the player clicks Left Mouse Button when `PistolMagazine == 0` and is not already reloading:
+  - Automatically invoke the normal reload request (`ReloadPistol:FireServer()`).
+- Manual reload via `R` key must continue working.
+- Both manual and auto-reload must use the exact same authoritative server path.
+- Avoid remote spam if the player clicks rapidly while reloading.
 
 ---
 
-## Weapon networking and security
+## Visual Presentation Requirements
 
-This is a Roblox game.
+### 1. Zombie Visual Replacement (`assets/Zombie.rbxm`)
+- Replace the procedural 3-part block rig with a clone of `assets/Zombie.rbxm`.
+- Map `assets/` into `ReplicatedStorage.Assets` via `default.project.json`.
+- Sanitize the cloned zombie template on the server:
+  - Remove/disable foreign AI or health scripts (`NPC`, `Health`, `Ragdoll`, `Maid`, `RigTypes`, `RbxNpcSounds`).
+  - Retain visual meshes, Motor6D joints, R15 rig hierarchy, Animator, and animations.
+- Existing `Zombie.luau` must retain full authority over health, walkspeed, targeting, pursuit, attacks, attributes (`IsZombie`, `IsDead`), and 3-second corpse cleanup with collision removal.
+- Play native locomotion animations (idle/walk) via Animator or sanitized `Animate` script.
 
-The client must NOT be trusted to decide important combat results.
-
-The client may communicate shooting intent and aim information.
-
-The server must validate important state such as:
-
-- whether the player is allowed to fire
-- whether the pistol is currently reloading
-- fire-rate limits
-- ammunition
-- weapon identity where relevant
-- damage
-
-The client must never be able to send an arbitrary damage number that the server simply accepts.
-
-Do not create an excessively complicated anti-cheat system during this milestone.
-
-We only need sensible server authority and validation for the prototype.
-
----
-
-## Shooting
-
-Use Roblox raycasting / hitscan.
-
-The weapon should shoot toward the player's crosshair / camera aim.
-
-The implementation should avoid trusting arbitrary client-selected victims.
-
-Antigravity must determine the simplest secure architecture after inspecting the project.
-
-The prototype does not need realistic ballistics or physical bullets.
+### 2. FPS Viewmodel (`assets/Arms.rbxm` + `assets/Pistol.rbxm`)
+- Create a client-only first-person viewmodel (`src/client/ViewmodelController.luau`).
+- Clone `Arms` and `Pistol` locally from `ReplicatedStorage.Assets`.
+- Attach the Pistol model rigidly to the Arms model (via `WeldConstraint` to `PrimaryPart`).
+- Position the viewmodel relative to `workspace.CurrentCamera` each rendered frame (`RenderStepped`).
+- Configure all viewmodel BaseParts:
+  - `CanCollide = false`, `CanTouch = false`, `CanQuery = false` (raycasts ignore viewmodel).
+  - `CastShadow = false`, `Massless = true`.
+- Centralize camera offset, pistol offset, and scale in `src/client/ViewmodelConfig.luau` for easy tuning in Studio.
+- Minimal firing feedback: slight viewmodel recoil kick on LMB.
+- Real character visibility: prevent player avatar limbs/accessories from clipping through the camera viewmodel in first person.
+- Viewmodel lifecycle: hide/destroy on player death, reconstruct cleanly upon respawn without leaking render connections.
 
 ---
 
-## Pistol presentation
+## Non-Negotiable Architecture Constraints
 
-The combat system must be testable and understandable in first person.
-
-A polished production-quality weapon model is NOT required during this milestone.
-
-If there is no suitable pistol asset already present in the project:
-
-- do not depend on a random Toolbox asset
-- do not block development on art
-- use the simplest reasonable temporary presentation or clearly separate gameplay from future viewmodel work
-
-Do not build a complex first-person arms/viewmodel animation system yet.
-
-Minimal feedback is acceptable, such as:
-
-- simple shot feedback
-- ammo display
-- optional minimal hit feedback
-
-Only add what is useful for testing the combat loop.
+- **Gameplay Authority Remains Server-Side**:
+  - The viewmodel and pistol model are 100% cosmetic client presentation.
+  - Firing validation, hitscan raycasting from player's real Head, ammunition decrement, and damage calculation remain strictly on the server in `PistolServer.luau`.
+  - Zombie AI and damage remain strictly on the server in `Zombie.luau`.
+- **No Premature Complexity**:
+  - Do NOT implement viewmodel procedural sway, walking bobbing, complex IK, or viewmodel inventory frameworks.
+  - Do NOT implement secondary weapons, weapon switching, shotgun, AKM, melee, or patron systems.
 
 ---
 
-## Ammo UI
-
-The player should have a very simple temporary ammo display.
-
-It may show something like:
-
-12 / 60
-
-This is prototype UI.
-
-Do not create a large HUD framework.
-
-The existing crosshair must continue to work.
-
----
-
-## Basic zombie requirements
-
-Create one prototype zombie enemy.
-
-The zombie needs:
-
-- health
-- detection of a living player
-- target selection
-- chasing
-- close-range attack
-- attack cooldown
-- damage to player
-- death
-- stopping all combat behavior after death
-
-For this milestone, prioritize reliable behavior over sophisticated AI.
-
----
-
-## Zombie movement
-
-Use Roblox-native systems where practical.
-
-The zombie should be able to move toward the player.
-
-If PathfindingService is genuinely necessary for the current simple test environment, it may be used.
-
-However:
-
-- do not build an advanced navigation framework yet
-- do not create complicated state machines unless the current problem actually requires them
-- do not overengineer obstacle handling for a flat prototype arena
-
-The architecture should allow better navigation later without forcing us to implement all of it now.
-
----
-
-## Zombie targeting
-
-For the current milestone:
-
-- one zombie is enough
-- target a living player
-- ignore dead players
-- if the target dies or becomes invalid, stop attacking and reacquire appropriately
-
-Design the code so that multiple zombies could be supported later without requiring a complete rewrite, but do NOT build wave spawning yet.
-
----
-
-## Zombie attack
-
-When sufficiently close to the player:
-
-- stop or slow appropriately
-- attack
-- apply server-authoritative damage
-- respect an attack cooldown
-- do not apply damage every frame
-
-The prototype does not require elaborate attack animations yet.
-
----
-
-## Player health and death
-
-Use Roblox's existing Humanoid health/death behavior where practical.
-
-The zombie must be capable of killing the player.
-
-After the player's normal Roblox respawn:
-
-- first-person camera must still work
-- crosshair must still work
-- pistol controls must work again
-- ammo state must initialize correctly
-- zombies must not keep invalid references to the previous dead Character
-
-Do not build a custom respawn system unless necessary.
-
----
-
-## Zombie health and death
-
-The pistol must be able to damage the zombie.
-
-At 0 HP:
-
-- the zombie dies
-- it no longer moves
-- it no longer attacks
-- it cannot continue dealing damage
-
-A sophisticated corpse/despawn system is not required yet.
-
----
-
-## Test zombie
-
-The milestone must provide a practical way to test the zombie in Roblox Studio.
-
-Determine the cleanest solution after inspecting the repository.
-
-Possible approaches include:
-
-- a simple prototype zombie model that exists through Rojo-managed project files
-- a server-created test zombie
-- another simple reproducible development setup
-
-Do NOT rely on the developer manually rebuilding the zombie every time Studio starts.
-
-Avoid random external Toolbox dependencies unless explicitly approved.
-
----
-
-## Architecture goals
-
-Keep the system modular enough that we can later add:
-
-- Shotgun
-- AKM
-- additional weapons
-- additional zombie types
-- waves
-- upgrades / Patrons
-
-But do NOT implement those systems now.
-
-Avoid premature abstractions.
-
-We specifically do NOT want:
-
-- a huge generic weapon framework
-- a huge enemy framework
-- a giant dependency injection system
-- unnecessary service layers
-- speculative systems for features we have not built
-
-Prefer the minimum architecture that cleanly supports this vertical slice and can reasonably evolve.
-
----
-
-## Do not implement
-
-Do NOT implement during this milestone:
-
-- Shotgun
-- AKM
-- weapon switching
-- weapon inventory
-- melee
-- weapon pickups
-- Patron upgrades
-- boon selection
-- waves
-- encounter manager
-- multiple zombie classes
-- elite zombies
-- bosses
-- loot
-- economy
-- complex recoil system
-- polished weapon animations
-- first-person arm rig
-- advanced zombie animations
-- blood/gore system
-- sound system overhaul
-- map generation
-- large map
-- sprint
-- slide
-- dash
-- custom character movement
-- save data
-
-Do not modify unrelated working FPS systems unless necessary.
-
----
-
-## Acceptance criteria
-
-The milestone is successful when all of the following can be demonstrated in Roblox Studio:
-
-1. Player spawns in first person.
-2. Existing crosshair works.
-3. Player has access to the prototype pistol.
-4. Left click fires one pistol shot.
-5. Holding the mouse does not turn the pistol into automatic fire.
-6. Magazine ammo decreases correctly.
-7. Empty magazine cannot fire.
-8. R reloads the pistol.
-9. Reload uses reserve ammo correctly.
-10. Pistol raycast can hit the zombie.
-11. Zombie loses health from valid pistol hits.
-12. Client cannot simply choose an arbitrary damage value.
-13. Zombie detects the player.
-14. Zombie chases the player.
-15. Zombie attacks only at close range.
-16. Zombie attack respects a cooldown.
-17. Zombie damages the player.
-18. Zombie can kill the player.
-19. Zombie dies when its health reaches zero.
-20. Dead zombie stops moving and attacking.
-21. After player respawn, FPS camera and crosshair still work.
-22. After player respawn, pistol controls work again.
-23. Zombie does not keep attacking the destroyed old Character.
-24. Roblox Studio Output contains no repeating runtime errors.
-25. Existing FPS foundation is not broken.
-
----
-
-## Verification
-
-The implementation must eventually be tested manually in Roblox Studio.
-
-The manual test should include:
-
-- spawn
-- fire pistol
-- verify semi-auto behavior
-- empty magazine
-- attempt empty shot
-- reload
-- verify ammo counts
-- shoot zombie
-- verify zombie HP changes
-- allow zombie to chase player
-- allow zombie to attack
-- allow zombie to kill player
-- respawn
-- verify FPS systems still work
-- verify pistol works after respawn
-- kill zombie
-- verify zombie stops completely
-- inspect Output for errors
+## Acceptance Criteria
+
+1. Every living zombie in the arena pursues the player regardless of distance.
+2. Zombies never spawn clustered or overlapping each other (separated by at least 12 studs).
+3. Zombies never spawn within 50 studs of the living player.
+4. When magazine is 0, clicking LMB initiates reload automatically.
+5. Pressing R still reloads when magazine is below 12.
+6. The imported R15 zombie model appears in the arena instead of the block rig.
+7. Imported zombie plays locomotion animations while moving.
+8. Pistol raycasts hit the imported zombie model, dealing 25 damage per shot.
+9. Dead zombie parts immediately lose all collisions and raycast query.
+10. Dead zombie corpse is destroyed after ~3 seconds.
+11. First-person arms and pistol appear in front of the camera.
+12. Pistol is rigidly attached to arms and follows camera movement smoothly.
+13. Viewmodel does not block raycasts or collide with the world.
+14. Real character avatar parts do not clip into viewmodel.
+15. Firing produces a subtle viewmodel recoil kick.
+16. Player death hides viewmodel; player respawn reconstructs viewmodel exactly once.
+17. Living zombies reacquire the player upon respawn and resume pursuit.
+18. Studio Output remains free of repeating errors or warnings.
